@@ -1,0 +1,134 @@
+/**
+ * ATUM Product Levels - Analytics Status Page Styles
+ *
+ * @since 1.9.14
+ */
+
+.atum-pl-analytics-status {
+	max-width: 1200px;
+}
+
+.atum-pl-status-section {
+	background: #fff;
+	border: 1px solid #ccd0d4;
+	box-shadow: 0 1px 1px rgba(0,0,0,.04);
+	margin: 20px 0;
+	padding: 20px;
+}
+
+.atum-pl-status-section h2 {
+	margin-top: 0;
+	border-bottom: 1px solid #eee;
+	padding-bottom: 10px;
+}
+
+.atum-status-indicator {
+	font-size: 24px;
+	display: inline-block;
+	vertical-align: middle;
+}
+
+.atum-status-indicator.success {
+	color: #46b450;
+}
+
+.atum-status-indicator.error {
+	color: #dc3232;
+}
+
+.atum-progress-bar {
+	background: #f0f0f1;
+	border-radius: 4px;
+	height: 20px;
+	margin-top: 8px;
+	overflow: hidden;
+}
+
+.atum-progress-fill {
+	background: linear-gradient(90deg, #0073aa, #00a0d2);
+	height: 100%;
+	transition: width 0.3s ease;
+}
+
+.atum-backfill-status {
+	display: inline-block;
+	padding: 4px 12px;
+	border-radius: 3px;
+	font-weight: 600;
+}
+
+.atum-backfill-status.idle {
+	background: #f0f0f1;
+	color: #646970;
+}
+
+.atum-backfill-status.running {
+	background: #d5e7ff;
+	color: #135e96;
+	animation: pulse 1.5s ease-in-out infinite;
+}
+
+.atum-backfill-status.completed {
+	background: #d4edda;
+	color: #155724;
+}
+
+@keyframes pulse {
+	0%, 100% { opacity: 1; }
+	50% { opacity: 0.7; }
+}
+
+#atum-action-result {
+	margin-top: 15px;
+}
+
+#atum-action-result.notice-success {
+	border-left-color: #46b450;
+}
+
+#atum-action-result.notice-error {
+	border-left-color: #dc3232;
+}
+
+.atum-pl-status-section ul {
+	list-style: disc;
+	padding-left: 20px;
+}
+
+.atum-pl-status-section table th {
+	width: 200px;
+	font-weight: 600;
+}
+
+.atum-pl-status-section .button {
+	margin-right: 10px;
+}
+
+.atum-pl-status-section .button:disabled {
+	opacity: 0.5;
+	cursor: not-allowed;
+}
+
+.atum-product-type-badge {
+	display: inline-block;
+	padding: 3px 8px;
+	background: #f0f0f1;
+	border-radius: 3px;
+	font-size: 11px;
+	font-weight: 600;
+	color: #50575e;
+	text-transform: uppercase;
+	letter-spacing: 0.5px;
+}
+
+.atum-pl-status-section table th,
+.atum-pl-status-section table td {
+	vertical-align: middle;
+}
+
+.atum-pl-status-section table .button-small {
+	font-size: 11px;
+	padding: 2px 8px;
+	height: auto;
+	line-height: 1.5;
+}
