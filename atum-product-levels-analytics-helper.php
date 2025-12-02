@@ -47,18 +47,18 @@ if ( ! defined( 'ATUM_PL_ANALYTICS_BASENAME' ) ) {
 function atum_pl_analytics_helper_init() {
 
 	// Check if main plugin is active
-	if ( ! class_exists( '\AtumLevels\Models\BOMOrderItemsModel' ) ) {
-		add_action( 'admin_notices', function() {
-			?>
-			<div class="notice notice-error">
-				<p>
-					<strong><?php esc_html_e( 'ATUM Product Levels Analytics Helper', ATUM_PL_ANALYTICS_TEXT_DOMAIN ); ?></strong>: 
-					<?php esc_html_e( 'This plugin requires ATUM Product Levels to be installed and activated.', ATUM_PL_ANALYTICS_TEXT_DOMAIN ); ?>
-				</p>
-			</div>
-			<?php
-		} );
-		return;
+	// Try multiple possible class names/paths
+	$bom_class_exists = class_exists( '\AtumLevels\Models\BOMOrderItemsModel' );
+	
+	if ( ! $bom_class_exists ) {
+		// Try alternative class path (without leading backslash)
+		$bom_class_exists = class_exists( 'AtumLevels\Models\BOMOrderItemsModel' );
+	}
+	
+	if ( ! $bom_class_exists ) {
+		// Even if class not found, still initialize StatusPage so menu can register
+		// The menu registration will check for the class when it runs
+		// Don't return - continue to initialize StatusPage
 	}
 
 	// Check if WooCommerce is active
@@ -84,14 +84,16 @@ function atum_pl_analytics_helper_init() {
 	\AtumPLAnalyticsHelper\Analytics\Sync::get_instance();
 
 	// Initialize Status Page (admin menu and AJAX handlers)
-	if ( is_admin() ) {
-		require_once ATUM_PL_ANALYTICS_PATH . 'includes/Analytics/StatusPage.php';
-		\AtumPLAnalyticsHelper\Analytics\StatusPage::get_instance();
-	}
+	// Must initialize immediately - admin_menu fires before admin_init
+	// StatusPage will handle admin checks internally
+	require_once ATUM_PL_ANALYTICS_PATH . 'includes/Analytics/StatusPage.php';
+	
+	\AtumPLAnalyticsHelper\Analytics\StatusPage::get_instance();
 }
 
-// Initialize after plugins are loaded (priority 20 = after main plugin)
-add_action( 'plugins_loaded', 'atum_pl_analytics_helper_init', 20 );
+// Initialize after plugins are loaded - use higher priority to ensure ATUM is loaded first
+// ATUM typically loads on priority 10, so we use 20+ to ensure it's ready
+add_action( 'plugins_loaded', 'atum_pl_analytics_helper_init', 30 );
 
 /**
  * Load plugin textdomain

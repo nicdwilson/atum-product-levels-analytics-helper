@@ -179,11 +179,12 @@ class Sync {
 	 *
 	 * @since 1.0.0
 	 *
-	 * @param int $order_id Order ID.
+	 * @param int  $order_id Order ID.
+	 * @param bool $is_backfill Optional. Whether this is called from backfill operation. Default false.
 	 *
 	 * @return bool Success status.
 	 */
-	public function sync_bom_to_analytics( $order_id ) {
+	public function sync_bom_to_analytics( $order_id, $is_backfill = false ) {
 
 		global $wpdb;
 
@@ -241,24 +242,44 @@ class Sync {
 
 		global $wpdb;
 
+		// Ensure item_id and bom_id are integers for consistent synthetic ID calculation
+		$item_id_int = (int) $item_id;
+		$bom_id_int  = (int) $bom_item->bom_id;
+
 		// Create synthetic order_item_id to avoid PRIMARY KEY conflict
 		// Format: original_item_id + bom_id (ensures uniqueness)
 		// Example: 793171 + 342255 = 793171342255
-		$synthetic_item_id = (int) ( $item_id . $bom_item->bom_id );
+		$synthetic_item_id = (int) ( $item_id_int . $bom_id_int );
 
-		// Check if already synced using synthetic ID.
+		// Check if already synced using synthetic ID (primary check)
 		$exists = $wpdb->get_var(
 			$wpdb->prepare(
 				"SELECT order_item_id FROM {$wpdb->prefix}wc_order_product_lookup
 				WHERE order_id = %d AND product_id = %d AND order_item_id = %d",
 				$order_id,
-				$bom_item->bom_id,
+				$bom_id_int,
 				$synthetic_item_id
 			)
 		);
 
+		// If not found by synthetic ID, check for any existing records with same order_id + product_id
+		// This handles cases where synthetic ID might have been calculated differently or duplicates exist
+		if ( ! $exists ) {
+			// Delete any existing records for this order_id + product_id combination
+			// We'll insert the correct one with the proper synthetic ID
+			$wpdb->delete(
+				"{$wpdb->prefix}wc_order_product_lookup",
+				array(
+					'order_id'   => $order_id,
+					'product_id' => $bom_id_int,
+				),
+				array( '%d', '%d' )
+			);
+			$exists = false; // Will insert new record with correct synthetic ID
+		}
+
 		// Get product to check if it still exists.
-		$product = wc_get_product( $bom_item->bom_id );
+		$product = wc_get_product( $bom_id_int );
 
 		if ( ! $product ) {
 			return false;
@@ -272,11 +293,11 @@ class Sync {
 
 		$data = array(
 			'order_id'              => $order_id,
-			'product_id'            => $bom_item->bom_id,
+			'product_id'            => $bom_id_int,
 			'variation_id'          => 0,
 			'customer_id'           => $order->get_customer_id() ?: 0,
 			'order_item_id'         => $synthetic_item_id,
-			'product_qty'           => $bom_item->qty,
+			'product_qty'           => (float) $bom_item->qty,
 			'product_net_revenue'  => 0, // BOMs are components, not sold directly.
 			'product_gross_revenue' => 0,
 			'date_created'          => $date_created->date( 'Y-m-d H:i:s' ),
@@ -293,7 +314,7 @@ class Sync {
 				$data,
 				array(
 					'order_id'      => $order_id,
-					'product_id'    => $bom_item->bom_id,
+					'product_id'    => $bom_id_int,
 					'order_item_id' => $synthetic_item_id,
 				),
 				array(
@@ -336,7 +357,7 @@ class Sync {
 			);
 		}
 
-		do_action( 'atum/product_levels/analytics/bom_synced', $order_id, $bom_item->bom_id, $result );
+		do_action( 'atum/product_levels/analytics/bom_synced', $order_id, $bom_id_int, $result );
 
 		return false !== $result;
 	}
@@ -385,6 +406,48 @@ class Sync {
 	}
 
 	/**
+	 * Remove duplicate BOM records from analytics
+	 * For each order_id + product_id combination, keeps only one record
+	 * The sync process will recreate them with correct synthetic IDs
+	 *
+	 * @since 1.0.0
+	 *
+	 * @return array Result with count of removed duplicates.
+	 */
+	public function remove_duplicates() {
+
+		global $wpdb;
+
+		// Find duplicates: same order_id + product_id but different order_item_id
+		// Delete all but one (we'll keep the one with the lowest order_item_id as a placeholder)
+		$duplicates_removed = $wpdb->query(
+			"DELETE wpl1 FROM {$wpdb->prefix}wc_order_product_lookup wpl1
+			INNER JOIN {$wpdb->prefix}atum_product_data apd ON wpl1.product_id = apd.product_id
+			INNER JOIN (
+				SELECT order_id, product_id, MIN(order_item_id) as min_item_id
+				FROM {$wpdb->prefix}wc_order_product_lookup wpl2
+				INNER JOIN {$wpdb->prefix}atum_product_data apd2 ON wpl2.product_id = apd2.product_id
+				WHERE apd2.is_bom = 1
+				GROUP BY order_id, product_id
+				HAVING COUNT(*) > 1
+			) dup ON wpl1.order_id = dup.order_id 
+				AND wpl1.product_id = dup.product_id
+				AND wpl1.order_item_id > dup.min_item_id
+			WHERE apd.is_bom = 1"
+		);
+
+		return array(
+			'success' => true,
+			'removed' => (int) $duplicates_removed,
+			'message' => sprintf(
+				/* translators: %d: number of duplicates removed */
+				__( 'Removed %d duplicate BOM records.', ATUM_PL_ANALYTICS_TEXT_DOMAIN ),
+				$duplicates_removed
+			),
+		);
+	}
+
+	/**
 	 * Get sync status for analytics integration
 	 *
 	 * @since 1.0.0
@@ -395,29 +458,32 @@ class Sync {
 
 		global $wpdb;
 
-		// Count total BOM records.
+		// Count total BOM records (distinct order_item_id + bom_id combinations).
 		$total_boms = $wpdb->get_var(
-			"SELECT COUNT(*) FROM {$wpdb->prefix}atum_order_boms"
+			"SELECT COUNT(DISTINCT CONCAT(aob.order_item_id, '-', aob.bom_id))
+			FROM {$wpdb->prefix}atum_order_boms aob"
 		);
 
-		// Count synced BOM records in analytics.
-		// Note: Variations don't have product_type taxonomy, so we need to check ATUM data or post_type
+		// Count synced BOM records in analytics (distinct by order_id + product_id + order_item_id).
+		// This ensures we count actual synced records, not duplicates.
 		$synced_boms = $wpdb->get_var(
-			"SELECT COUNT(*)
+			"SELECT COUNT(DISTINCT CONCAT(wpl.order_id, '-', wpl.product_id, '-', wpl.order_item_id))
 			FROM {$wpdb->prefix}wc_order_product_lookup wpl
-			INNER JOIN {$wpdb->posts} p ON wpl.product_id = p.ID
-			LEFT JOIN {$wpdb->prefix}atum_product_data apd ON wpl.product_id = apd.product_id
+			INNER JOIN {$wpdb->prefix}atum_product_data apd ON wpl.product_id = apd.product_id
 			WHERE apd.is_bom = 1"
 		);
 
 		// Check if hooks are registered.
 		$hooks_active = has_filter( 'woocommerce_analytics_products_excluded_product_types', array( $this, 'include_product_parts_in_analytics' ) );
 
+		// Calculate sync percentage (cap at 100% to handle duplicates during cleanup).
+		$sync_percent = $total_boms > 0 ? min( 100, round( ( $synced_boms / $total_boms ) * 100, 2 ) ) : 0;
+
 		return array(
 			'total_boms'   => (int) $total_boms,
 			'synced_boms'  => (int) $synced_boms,
 			'hooks_active' => (bool) $hooks_active,
-			'sync_percent' => $total_boms > 0 ? round( ( $synced_boms / $total_boms ) * 100, 2 ) : 0,
+			'sync_percent' => $sync_percent,
 		);
 	}
 

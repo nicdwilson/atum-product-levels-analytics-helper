@@ -21,12 +21,22 @@ class StatusPage {
 	private static $instance;
 
 	/**
+	 * The admin page hook
+	 *
+	 * @var string
+	 */
+	private $page_hook;
+
+	/**
 	 * StatusPage constructor
 	 *
 	 * @since 1.0.0
 	 */
 	private function __construct() {
+		// Register admin menu hook - use priority 100 to ensure it runs after ATUM/WooCommerce menus
 		add_action( 'admin_menu', array( $this, 'add_menu_page' ), 100 );
+		
+		// Register other admin hooks
 		add_action( 'admin_enqueue_scripts', array( $this, 'enqueue_scripts' ) );
 		add_action( 'wp_ajax_atum_pl_analytics_backfill', array( $this, 'ajax_backfill' ) );
 		add_action( 'wp_ajax_atum_pl_analytics_progress', array( $this, 'ajax_get_progress' ) );
@@ -71,13 +81,34 @@ class StatusPage {
 	 */
 	public function add_menu_page() {
 
-		// Check if ATUM menu exists, otherwise use WooCommerce menu.
-		$parent_slug = 'atum-dashboard';
-		if ( ! menu_page_url( 'atum-dashboard', false ) ) {
-			$parent_slug = 'woocommerce';
+		// Final check - if BOMOrderItemsModel still doesn't exist, don't register menu
+		// This allows menu to register even if class wasn't found at plugins_loaded time
+		if ( ! class_exists( '\AtumLevels\Models\BOMOrderItemsModel' ) && ! class_exists( 'AtumLevels\Models\BOMOrderItemsModel' ) ) {
+			return;
 		}
 
-		add_submenu_page(
+		// Check if ATUM menu exists, otherwise use WooCommerce menu.
+		global $menu, $submenu;
+		$parent_slug = 'woocommerce'; // Default to WooCommerce
+		
+		// Check if ATUM menu exists by checking both menu and submenu arrays.
+		// ATUM typically registers its menu with 'atum-dashboard' slug.
+		$atum_menu_exists = false;
+		if ( isset( $menu ) && is_array( $menu ) ) {
+			foreach ( $menu as $menu_item ) {
+				if ( isset( $menu_item[2] ) && 'atum-dashboard' === $menu_item[2] ) {
+					$atum_menu_exists = true;
+					break;
+				}
+			}
+		}
+		
+		if ( $atum_menu_exists || ( isset( $submenu['atum-dashboard'] ) && is_array( $submenu['atum-dashboard'] ) ) ) {
+			$parent_slug = 'atum-dashboard';
+		}
+
+		// Try to add as submenu first.
+		$hook = add_submenu_page(
 			$parent_slug,
 			__( 'BOM Analytics Status', ATUM_PL_ANALYTICS_TEXT_DOMAIN ),
 			__( 'BOM Analytics', ATUM_PL_ANALYTICS_TEXT_DOMAIN ),
@@ -85,6 +116,24 @@ class StatusPage {
 			'atum-bom-analytics',
 			array( $this, 'render_page' )
 		);
+
+		// If submenu failed (parent doesn't exist), create as top-level menu.
+		if ( ! $hook ) {
+			$hook = add_menu_page(
+				__( 'BOM Analytics Status', ATUM_PL_ANALYTICS_TEXT_DOMAIN ),
+				__( 'BOM Analytics', ATUM_PL_ANALYTICS_TEXT_DOMAIN ),
+				'manage_woocommerce',
+				'atum-bom-analytics',
+				array( $this, 'render_page' ),
+				'dashicons-chart-line',
+				56
+			);
+		}
+
+		// Store the hook for script enqueuing.
+		if ( $hook ) {
+			$this->page_hook = $hook;
+		}
 	}
 
 	/**
@@ -96,8 +145,19 @@ class StatusPage {
 	 */
 	public function enqueue_scripts( $hook ) {
 
-		// Check for both possible hook names (ATUM menu or WooCommerce menu).
-		if ( 'atum-inventory_page_atum-bom-analytics' !== $hook && 'woocommerce_page_atum-bom-analytics' !== $hook ) {
+		// Check for all possible hook names (ATUM menu, WooCommerce menu, or top-level menu).
+		// Also check against stored page hook if available.
+		$valid_hooks = array(
+			'atum-inventory_page_atum-bom-analytics',
+			'woocommerce_page_atum-bom-analytics',
+			'toplevel_page_atum-bom-analytics',
+		);
+		
+		if ( ! empty( $this->page_hook ) ) {
+			$valid_hooks[] = $this->page_hook;
+		}
+
+		if ( ! in_array( $hook, $valid_hooks, true ) ) {
 			return;
 		}
 
@@ -123,6 +183,11 @@ class StatusPage {
 	 * @since 1.0.0
 	 */
 	public function render_page() {
+
+		// Check user capabilities.
+		if ( ! current_user_can( 'manage_woocommerce' ) ) {
+			wp_die( esc_html__( 'You do not have sufficient permissions to access this page.', ATUM_PL_ANALYTICS_TEXT_DOMAIN ) );
+		}
 
 		$sync_status     = Sync::get_instance()->get_sync_status();
 		$backfill_status = BackfillTool::get_instance()->get_progress();
@@ -334,26 +399,56 @@ class StatusPage {
 
 		global $wpdb;
 
-		$results = $wpdb->get_results(
-			"SELECT
-				wpl.product_id,
-				wpl.order_id,
-				wpl.product_qty,
-				wpl.date_created,
-				p.post_title as product_name,
-				CASE
-					WHEN p.post_type = 'product_variation' THEN 'Product Part Variation'
-					ELSE COALESCE(t.slug, 'product-part')
-				END as product_type
+		// First, get the 10 most recent distinct orders with BOMs
+		// This ensures we get 10 different orders, not 10 BOM items (which could be from 2 orders)
+		$recent_order_ids = $wpdb->get_col(
+			"SELECT DISTINCT wpl.order_id
 			FROM {$wpdb->prefix}wc_order_product_lookup wpl
-			INNER JOIN {$wpdb->posts} p ON wpl.product_id = p.ID
 			INNER JOIN {$wpdb->prefix}atum_product_data apd ON wpl.product_id = apd.product_id
-			LEFT JOIN {$wpdb->term_relationships} tr ON p.ID = tr.object_id
-			LEFT JOIN {$wpdb->term_taxonomy} tt ON tr.term_taxonomy_id = tt.term_taxonomy_id AND tt.taxonomy = 'product_type'
-			LEFT JOIN {$wpdb->terms} t ON tt.term_id = t.term_id
 			WHERE apd.is_bom = 1
 			ORDER BY wpl.date_created DESC
 			LIMIT 10"
+		);
+
+		if ( empty( $recent_order_ids ) ) {
+			return array();
+		}
+
+		// Then get one BOM item from each of those orders
+		// Using a subquery to get the first (lowest order_item_id) BOM from each order
+		$placeholders = implode( ',', array_fill( 0, count( $recent_order_ids ), '%d' ) );
+
+		$results = $wpdb->get_results(
+			$wpdb->prepare(
+				"SELECT
+					wpl.product_id,
+					wpl.order_id,
+					wpl.product_qty,
+					wpl.date_created,
+					p.post_title as product_name,
+					CASE
+						WHEN p.post_type = 'product_variation' THEN 'Product Part Variation'
+						ELSE COALESCE(t.slug, 'product-part')
+					END as product_type
+				FROM {$wpdb->prefix}wc_order_product_lookup wpl
+				INNER JOIN {$wpdb->posts} p ON wpl.product_id = p.ID
+				INNER JOIN {$wpdb->prefix}atum_product_data apd ON wpl.product_id = apd.product_id
+				LEFT JOIN {$wpdb->term_relationships} tr ON p.ID = tr.object_id
+				LEFT JOIN {$wpdb->term_taxonomy} tt ON tr.term_taxonomy_id = tt.term_taxonomy_id AND tt.taxonomy = 'product_type'
+				LEFT JOIN {$wpdb->terms} t ON tt.term_id = t.term_id
+				INNER JOIN (
+					SELECT order_id, MIN(order_item_id) as first_item_id
+					FROM {$wpdb->prefix}wc_order_product_lookup wpl2
+					INNER JOIN {$wpdb->prefix}atum_product_data apd2 ON wpl2.product_id = apd2.product_id
+					WHERE apd2.is_bom = 1
+						AND wpl2.order_id IN ($placeholders)
+					GROUP BY wpl2.order_id
+				) first_bom ON wpl.order_id = first_bom.order_id 
+					AND wpl.order_item_id = first_bom.first_item_id
+				WHERE apd.is_bom = 1
+				ORDER BY wpl.date_created DESC",
+				$recent_order_ids
+			)
 		);
 
 		return $results;

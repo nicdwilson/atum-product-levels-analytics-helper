@@ -184,10 +184,15 @@ class BackfillTool {
 	 */
 	public function start_backfill( $force = false ) {
 
+		$logger = function_exists( 'wc_get_logger' ) ? wc_get_logger() : null;
+
 		$progress = $this->get_progress();
 
 		// Check if already in progress.
 		if ( ! $force && 'running' === $progress['status'] ) {
+			if ( $logger ) {
+				$logger->info( 'BOM Analytics Backfill: Already in progress, skipping start.', array( 'source' => 'atum-pl-analytics-helper' ) );
+			}
 			return array(
 				'success' => false,
 				'message' => __( 'Backfill is already in progress.', ATUM_PL_ANALYTICS_TEXT_DOMAIN ),
@@ -203,6 +208,10 @@ class BackfillTool {
 		// Initialize progress.
 		$total = $this->get_total_orders();
 
+		if ( $logger ) {
+			$logger->info( sprintf( 'BOM Analytics Backfill: Starting backfill for %d orders.', $total ), array( 'source' => 'atum-pl-analytics-helper' ) );
+		}
+
 		$this->update_progress( array(
 			'processed' => 0,
 			'total'     => $total,
@@ -212,6 +221,14 @@ class BackfillTool {
 			'errors'    => 0,
 			'percent'   => 0,
 		) );
+
+		// Clean up any existing duplicates before starting backfill
+		$sync = Sync::get_instance();
+		$duplicate_result = $sync->remove_duplicates();
+		
+		if ( $logger && isset( $duplicate_result['removed'] ) && $duplicate_result['removed'] > 0 ) {
+			$logger->info( sprintf( 'BOM Analytics Backfill: Removed %d duplicate records before starting.', $duplicate_result['removed'] ), array( 'source' => 'atum-pl-analytics-helper' ) );
+		}
 
 		// Process synchronously (Action Scheduler unreliable in some setups)
 		// Frontend JS will poll for progress updates
@@ -265,6 +282,8 @@ class BackfillTool {
 	 */
 	private function backfill_all_sync() {
 
+		$logger = function_exists( 'wc_get_logger' ) ? wc_get_logger() : null;
+
 		$progress = $this->get_progress();
 		$total    = $progress['total'];
 
@@ -272,14 +291,24 @@ class BackfillTool {
 		$offset    = 0;
 		$processed = 0;
 		$errors    = 0;
+		$batch_num = 0;
 
 		while ( $offset < $total ) {
+			$batch_num++;
+
+			if ( $logger ) {
+				$logger->info( sprintf( 'BOM Analytics Backfill: Processing batch %d (offset %d, limit %d)', $batch_num, $offset, self::BATCH_SIZE ), array( 'source' => 'atum-pl-analytics-helper' ) );
+			}
 
 			$result = $this->backfill_batch( $offset, self::BATCH_SIZE );
 
 			$processed += $result['processed'];
 			$errors    += $result['errors'];
 			$offset    += self::BATCH_SIZE;
+
+			if ( $logger ) {
+				$logger->info( sprintf( 'BOM Analytics Backfill: Batch %d completed - %d processed, %d errors. Total progress: %d/%d (%.1f%%)', $batch_num, $result['processed'], $result['errors'], $processed, $total, round( ( $processed / $total ) * 100, 1 ) ), array( 'source' => 'atum-pl-analytics-helper' ) );
+			}
 
 			// Update progress.
 			$this->update_progress( array(
@@ -298,6 +327,11 @@ class BackfillTool {
 			'status'    => 'completed',
 			'completed' => current_time( 'mysql' ),
 		) );
+
+		// Log final result.
+		if ( $logger ) {
+			$logger->info( sprintf( 'BOM Analytics Backfill: COMPLETED - Processed %d orders, %d errors, %d successful. Total: %d orders.', $processed, $errors, $processed - $errors, $total ), array( 'source' => 'atum-pl-analytics-helper' ) );
+		}
 
 		return array(
 			'success' => true,
@@ -328,6 +362,8 @@ class BackfillTool {
 
 		global $wpdb;
 
+		$logger = function_exists( 'wc_get_logger' ) ? wc_get_logger() : null;
+
 		// Get order IDs with BOMs.
 		$order_ids = $wpdb->get_col(
 			$wpdb->prepare(
@@ -348,12 +384,18 @@ class BackfillTool {
 
 		foreach ( $order_ids as $order_id ) {
 
-			$result = $sync->sync_bom_to_analytics( $order_id );
+			$result = $sync->sync_bom_to_analytics( $order_id, true ); // Pass true to indicate backfill operation
 
 			if ( $result ) {
 				$processed++;
+				if ( $logger ) {
+					$logger->info( sprintf( 'BOM Analytics Backfill: Order #%d synced successfully', $order_id ), array( 'source' => 'atum-pl-analytics-helper' ) );
+				}
 			} else {
 				$errors++;
+				if ( $logger ) {
+					$logger->warning( sprintf( 'BOM Analytics Backfill: Order #%d sync failed (no BOMs found or error occurred)', $order_id ), array( 'source' => 'atum-pl-analytics-helper' ) );
+				}
 			}
 		}
 
